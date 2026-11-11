@@ -1,69 +1,322 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import React, { useEffect, useRef, useState } from 'react';
+import lottie, { AnimationItem } from 'lottie-web';
+
+interface SeedEntry {
+  seed: number;
+  id: string;
+  nickname: string;
+  conference: 'AFC' | 'NFC';
+  record: string;
+  primaryHex: string;
+  secondaryHex: string;
+  crestUrl: string;
+}
+
+// Teams whose monochrome dark logos blend into their dark primary row bars
+const WHITE_CREST_TEAMS = new Set(['NYG', 'NYJ']);
+
+function hexToLottieColor(hex: string): [number, number, number, number] {
+  const clean = hex.replace('#', '').trim();
+  const r = parseInt(clean.substring(0, 2), 16) / 255;
+  const g = parseInt(clean.substring(2, 4), 16) / 255;
+  const b = parseInt(clean.substring(4, 6), 16) / 255;
+  return [Number(r.toFixed(4)), Number(g.toFixed(4)), Number(b.toFixed(4)), 1];
+}
+
+// Convert embedded AFC background (image_2) into pixel-identical bg-nfc.png (#003B66 navy + exact white stars)
+function generateExactNfcBgFromAfc(afcBase64: string): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width || 1080;
+      canvas.height = img.height || 1920;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve(afcBase64);
+        return;
+      }
+      ctx.drawImage(img, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+
+      // Exact bg-nfc.png Navy Blue RGB: (0, 59, 102) -> #003B66
+      for (let i = 0; i < data.length; i += 4) {
+        const g = data[i + 1];
+        // Measure star whiteness from the green channel (13 in AFC red -> 255 in white star)
+        const t = Math.max(0, Math.min(1, (g - 13) / (255 - 13)));
+        data[i] = Math.round(t * 255); // R: 0 -> 255
+        data[i + 1] = Math.round(59 + t * (255 - 59)); // G: 59 -> 255
+        data[i + 2] = Math.round(102 + t * (255 - 102)); // B: 102 -> 255
+      }
+
+      ctx.putImageData(imageData, 0, 0);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => resolve(afcBase64);
+    img.src = afcBase64;
+  });
+}
+
+const NFC_LOGO_DATA_URI =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 92" width="128" height="92">
+    <path d="M18 86 L18 6 L54 6 L88 56 L88 6 L110 6 L110 86 L74 86 L40 36 L40 86 Z"
+          fill="none" stroke="#ffffff" stroke-width="5" stroke-linejoin="miter"/>
+    <circle cx="64" cy="24" r="3.5" fill="#ffffff"/>
+    <circle cx="64" cy="46" r="3.5" fill="#ffffff"/>
+    <circle cx="64" cy="68" r="3.5" fill="#ffffff"/>
+  </svg>`);
+
+export default function PlayoffEnginePage() {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const animRef = useRef<AnimationItem | null>(null);
+  const rawJsonRef = useRef<any>(null);
+  const nfcBgDataUriRef = useRef<string | null>(null);
+
+  const [selectedWeek, setSelectedWeek] = useState<number>(9);
+  const [selectedConference, setSelectedConference] = useState<'AFC' | 'NFC'>('AFC');
+  const [standings, setStandings] = useState<SeedEntry[]>([]);
+  const [templateReady, setTemplateReady] = useState<boolean>(false);
+  const [maxWeek, setMaxWeek] = useState<number>(9);
+
+  const weeks = Array.from({ length: maxWeek }, (_, i) => i + 1);
+
+  useEffect(() => {
+    fetch(`/nfl-playoff-engine.json?v=${Date.now()}`)
+      .then((res) => res.json())
+      .then(async (json) => {
+        rawJsonRef.current = json;
+        const afcBgAsset = json?.assets?.find((a: any) => a.id === 'image_2');
+        if (afcBgAsset?.p) {
+          nfcBgDataUriRef.current = await generateExactNfcBgFromAfc(afcBgAsset.p);
+        }
+        setTemplateReady(true);
+      })
+      .catch((err) => console.error('Failed to load nfl-playoff-engine.json:', err));
+  }, []);
+
+  useEffect(() => {
+    fetch(`/api/playoffs?week=${selectedWeek}&conference=${selectedConference}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.maxCompletedWeek) {
+          setMaxWeek(data.maxCompletedWeek);
+        }
+        if (data?.standings) {
+          setStandings(data.standings);
+        }
+      })
+      .catch((err) => console.error('Failed to fetch standings:', err));
+  }, [selectedWeek, selectedConference]);
+
+  useEffect(() => {
+    if (!templateReady || !rawJsonRef.current || standings.length < 7 || !containerRef.current) {
+      return;
+    }
+
+    if (animRef.current) {
+      animRef.current.destroy();
+      animRef.current = null;
+    }
+
+    const animationData = JSON.parse(JSON.stringify(rawJsonRef.current));
+
+    const setJsonLayerText = (layerName: string, textValue: string) => {
+      const layer = animationData.layers?.find((l: any) => l.nm === layerName);
+      if (layer?.t?.d?.k?.[0]?.s) {
+        layer.t.d.k[0].s.t = String(textValue).toUpperCase();
+      }
+    };
+
+    const setShapeLayerHex = (layerName: string, hex: string) => {
+      const layer = animationData.layers?.find((l: any) => l.nm === layerName);
+      if (!layer?.shapes) return;
+      const rgba = hexToLottieColor(hex);
+
+      const walkShapes = (items: any[]) => {
+        for (const item of items) {
+          if (item.ty === 'fl' && item.c?.k) {
+            item.c.k = rgba;
+          }
+          if (item.it) walkShapes(item.it);
+        }
+      };
+      walkShapes(layer.shapes);
+    };
+
+    const fixOverlayParentingAndHeight = (slot: number) => {
+      if (slot === 1) return;
+      const overlayLayer = animationData.layers?.find(
+        (l: any) => l.nm === `Shape_Overlay_Team_${slot}`
+      );
+      if (!overlayLayer) return;
+
+      delete overlayLayer.tt;
+      delete overlayLayer.tp;
+
+      const pathItem = overlayLayer.shapes?.[0]?.it?.find((item: any) => item.ty === 'sh');
+      if (pathItem?.ks?.k?.v) {
+        pathItem.ks.k.v = [
+          [-364.729, -113.033],
+          [-364.729, 47.883],
+          [-477.922, 47.883],
+          [-477.922, -113.033]
+        ];
+      }
+    };
+
+    const injectLayerImage = (
+      layerName: string,
+      uniqueAssetId: string,
+      imageUrl: string,
+      forceWhiteCrest: boolean
+    ) => {
+      const layer = animationData.layers?.find((l: any) => l.nm === layerName);
+      if (!layer || !animationData.assets) return;
+
+      const sourceAsset = animationData.assets.find((a: any) => a.id === layer.refId);
+      if (!sourceAsset) return;
+
+      const cloned = JSON.parse(JSON.stringify(sourceAsset));
+      cloned.id = uniqueAssetId;
+      cloned.p = imageUrl;
+      cloned.u = '';
+      cloned.e = 1;
+
+      layer.refId = uniqueAssetId;
+      if (forceWhiteCrest) {
+        layer.cl = 'white-crest';
+      }
+      animationData.assets.push(cloned);
+    };
+
+    setJsonLayerText('Text_Week', `WEEK ${selectedWeek}`);
+    setJsonLayerText('Text_Title', 'PLAYOFF PICTURE');
+
+    if (selectedConference === 'NFC' && animationData.assets) {
+      const logoAsset = animationData.assets.find((a: any) => a.id === 'image_1');
+      if (logoAsset) {
+        logoAsset.p = NFC_LOGO_DATA_URI;
+        logoAsset.u = '';
+        logoAsset.e = 1;
+      }
+      const bgAsset = animationData.assets.find((a: any) => a.id === 'image_2');
+      if (bgAsset && nfcBgDataUriRef.current) {
+        bgAsset.p = nfcBgDataUriRef.current;
+        bgAsset.u = '';
+        bgAsset.e = 1;
+      }
+    }
+
+    standings.slice(0, 7).forEach((team, idx) => {
+      const slot = idx + 1;
+      const forceWhite = WHITE_CREST_TEAMS.has(team.id);
+
+      setJsonLayerText(`Text_Team_Position_${slot}`, String(team.seed));
+      setJsonLayerText(`Text_Team_${slot}`, team.nickname);
+      setJsonLayerText(`Text_Record_Team_${slot}`, team.record);
+      setShapeLayerHex(`Shape_Team_${slot}`, team.primaryHex);
+      setShapeLayerHex(`Shape_Overlay_Team_${slot}`, team.secondaryHex);
+      fixOverlayParentingAndHeight(slot);
+      injectLayerImage(`Image_Crest_${slot}`, `crest_slot_${slot}_${team.id}`, team.crestUrl, forceWhite);
+    });
+
+    if (Array.isArray(animationData.layers)) {
+      const expandedLayers: any[] = [];
+      for (const layer of animationData.layers) {
+        expandedLayers.push(layer);
+        if (layer.td === 1 && typeof layer.nm === 'string' && layer.nm.startsWith('Shape_Team_')) {
+          const visibleBar = JSON.parse(JSON.stringify(layer));
+          delete visibleBar.td;
+          visibleBar.ind = layer.ind + 200;
+          visibleBar.nm = `${layer.nm}_VisibleBar`;
+          expandedLayers.push(visibleBar);
+        }
+      }
+      animationData.layers = expandedLayers;
+    }
+
+    const anim = lottie.loadAnimation({
+      container: containerRef.current,
+      renderer: 'svg',
+      loop: true,
+      autoplay: true,
+      animationData
+    });
+
+    anim.addEventListener('DOMLoaded', () => {
+      const elements = (anim as any)?.renderer?.elements;
+      if (!Array.isArray(elements)) return;
+
+      standings.slice(0, 7).forEach((team, idx) => {
+        if (!WHITE_CREST_TEAMS.has(team.id)) return;
+        const targetLayerName = `Image_Crest_${idx + 1}`;
+        const el = elements.find((item: any) => item?.data?.nm === targetLayerName);
+        if (el?.layerElement) {
+          el.layerElement.style.filter = 'brightness(0) invert(1)';
+          const imgNode = el.layerElement.querySelector('image');
+          if (imgNode) {
+            imgNode.style.filter = 'brightness(0) invert(1)';
+          }
+        }
+      });
+    });
+
+    animRef.current = anim;
+
+    return () => {
+      anim.destroy();
+    };
+  }, [templateReady, standings, selectedWeek, selectedConference]);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <div className="page-wrapper">
+      <header className="header">
+        <h1 className="title">NFL PLAYOFF PICTURE ENGINE</h1>
+        <p className="subtitle">Dynamic React + Node.js Broadcast Graphics Pipeline</p>
+      </header>
+
+      <div className="main-container">
+        <div className="selectors-grid">
+          <div className="selector-card">
+            <label className="selector-label">SELECT NFL WEEK (LIVE AUTO-SYNC)</label>
+            <select
+              value={selectedWeek}
+              onChange={(e) => setSelectedWeek(Number(e.target.value))}
+              className="team-select"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+              {weeks.map((w) => (
+                <option key={w} value={w}>
+                  Week {w}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="selector-card">
+            <label className="selector-label">SELECT CONFERENCE</label>
+            <select
+              value={selectedConference}
+              onChange={(e) => setSelectedConference(e.target.value as 'AFC' | 'NFC')}
+              className="team-select"
             >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+              <option value="AFC">AFC (American Football Conference)</option>
+              <option value="NFC">NFC (National Football Conference)</option>
+            </select>
+          </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+        <div className={`canvas-card ${selectedConference === 'AFC' ? 'afc-theme' : 'nfc-theme'}`}>
+          <div className="conference-watermark">
+            {selectedConference === 'AFC' ? 'A' : 'N'}
+          </div>
+          <div id="templateContainer" ref={containerRef} />
         </div>
-      </main>
+      </div>
     </div>
   );
 }

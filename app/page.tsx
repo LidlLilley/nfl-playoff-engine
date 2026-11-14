@@ -264,15 +264,12 @@ export default function PlayoffEnginePage() {
     const anim = lottie.loadAnimation({
       container: containerRef.current,
       renderer: 'svg',
-      loop: false,
-      autoplay: false,
+      loop: true,
+      autoplay: true,
       animationData
     });
 
     anim.addEventListener('DOMLoaded', () => {
-      // Play intro animation from frame 0 to 340 and hold
-      anim.playSegments([0, 340], true);
-
       const elements = (anim as any)?.renderer?.elements;
       if (!Array.isArray(elements)) return;
 

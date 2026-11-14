@@ -60,17 +60,6 @@ function generateExactNfcBgFromAfc(afcBase64: string): Promise<string> {
   });
 }
 
-const NFC_LOGO_DATA_URI =
-  'data:image/svg+xml;utf8,' +
-  encodeURIComponent(`
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 92" width="128" height="92">
-    <path d="M18 86 L18 6 L54 6 L88 56 L88 6 L110 6 L110 86 L74 86 L40 36 L40 86 Z"
-          fill="none" stroke="#ffffff" stroke-width="5" stroke-linejoin="miter"/>
-    <circle cx="64" cy="24" r="3.5" fill="#ffffff"/>
-    <circle cx="64" cy="46" r="3.5" fill="#ffffff"/>
-    <circle cx="64" cy="68" r="3.5" fill="#ffffff"/>
-  </svg>`);
-
 export default function PlayoffEnginePage() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const animRef = useRef<AnimationItem | null>(null);
@@ -216,7 +205,7 @@ export default function PlayoffEnginePage() {
     if (selectedConference === 'NFC' && animationData.assets) {
       const logoAsset = animationData.assets.find((a: any) => a.id === 'image_1');
       if (logoAsset) {
-        logoAsset.p = NFC_LOGO_DATA_URI;
+        logoAsset.p = '/nfc-logo.png';
         logoAsset.u = '';
         logoAsset.e = 1;
       }
@@ -228,9 +217,20 @@ export default function PlayoffEnginePage() {
       }
     }
 
+    // Map After Effects layer slots to NFL Wild Card Matchups (#7@#2, #6@#3, #5@#4)
+    const bracketSlotMap: { slot: number; team: SeedEntry }[] = [
+      { slot: 1, team: standings[0] }, // #1 Seed (First-Round Bye)
+      { slot: 3, team: standings[6] }, // #7 Seed (Top of Matchup Box 1)
+      { slot: 2, team: standings[1] }, // #2 Seed (Bottom of Matchup Box 1)
+      { slot: 5, team: standings[5] }, // #6 Seed (Top of Matchup Box 2)
+      { slot: 4, team: standings[2] }, // #3 Seed (Bottom of Matchup Box 2)
+      { slot: 7, team: standings[4] }, // #5 Seed (Top of Matchup Box 3)
+      { slot: 6, team: standings[3] }, // #4 Seed (Bottom of Matchup Box 3)
+    ];
+
     // --- TEAM LOOP ---
-    standings.slice(0, 7).forEach((team, idx) => {
-      const slot = idx + 1;
+    bracketSlotMap.forEach(({ slot, team }) => {
+      if (!team) return;
       const forceWhite = WHITE_CREST_TEAMS.has(team.id);
 
       // Position number in team's primary colour
@@ -276,9 +276,9 @@ export default function PlayoffEnginePage() {
       const elements = (anim as any)?.renderer?.elements;
       if (!Array.isArray(elements)) return;
 
-      standings.slice(0, 7).forEach((team, idx) => {
-        if (!WHITE_CREST_TEAMS.has(team.id)) return;
-        const targetLayerName = `Image_Crest_${idx + 1}`;
+      bracketSlotMap.forEach(({ slot, team }) => {
+        if (!team || !WHITE_CREST_TEAMS.has(team.id)) return;
+        const targetLayerName = `Image_Crest_${slot}`;
         const el = elements.find((item: any) => item?.data?.nm === targetLayerName);
         if (el?.layerElement) {
           el.layerElement.style.filter = 'brightness(0) invert(1)';

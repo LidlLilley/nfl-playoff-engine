@@ -1,340 +1,345 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
-import lottie, { AnimationItem } from 'lottie-web';
 
 interface SeedEntry {
   seed: number;
-  id: string;
+  teamId: string;
+  name?: string;
   nickname: string;
-  conference: 'AFC' | 'NFC';
+  division?: string;
   record: string;
+  winPct?: number;
   primaryHex: string;
   secondaryHex: string;
   crestUrl: string;
+  reason?: string;
 }
 
-// Teams whose monochrome dark logos blend into their dark primary row bars
-const WHITE_CREST_TEAMS = new Set(['NYG', 'NYJ']);
+// Clean white NFC logo SVG encoded as a Data URI
+const NFC_LOGO_DATA_URI =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+      <text x="50%" y="58%" dominant-baseline="middle" text-anchor="middle" fill="#FFFFFF" font-family="Impact, Arial Black, sans-serif" font-size="64" font-weight="900" letter-spacing="2">NFC</text>
+    </svg>
+  `);
 
+// Helper: Convert Hex (#RRGGBB) to Lottie normalized RGB array [r, g, b, 1]
 function hexToLottieColor(hex: string): [number, number, number, number] {
-  const clean = hex.replace('#', '').trim();
-  const r = parseInt(clean.substring(0, 2), 16) / 255;
-  const g = parseInt(clean.substring(2, 4), 16) / 255;
-  const b = parseInt(clean.substring(4, 6), 16) / 255;
-  return [Number(r.toFixed(4)), Number(g.toFixed(4)), Number(b.toFixed(4)), 1];
+  const cleanHex = hex.replace('#', '');
+  const r = parseInt(cleanHex.substring(0, 2), 16) / 255;
+  const g = parseInt(cleanHex.substring(2, 4), 16) / 255;
+  const b = parseInt(cleanHex.substring(4, 6), 16) / 255;
+  return [
+    Number(r.toFixed(4)),
+    Number(g.toFixed(4)),
+    Number(b.toFixed(4)),
+    1,
+  ];
 }
 
-// Convert embedded AFC background (image_2) into pixel-identical bg-nfc.png (#003B66 navy + exact white stars)
-function generateExactNfcBgFromAfc(afcBase64: string): Promise<string> {
+// Helper: Update text content on a Lottie Text Layer
+function setJsonLayerText(lottieJson: any, layerName: string, newText: string) {
+  const layer = lottieJson.layers?.find((l: any) => l.nm === layerName);
+  if (layer?.t?.d?.k?.[0]?.s) {
+    layer.t.d.k[0].s.t = newText;
+  }
+}
+
+// Helper: Update fill colour on a Lottie Text Layer
+function setTextLayerHex(lottieJson: any, layerName: string, hexColor: string) {
+  const layer = lottieJson.layers?.find((l: any) => l.nm === layerName);
+  if (layer?.t?.d?.k?.[0]?.s) {
+    const [r, g, b] = hexToLottieColor(hexColor);
+    layer.t.d.k[0].s.fc = [r, g, b];
+  }
+}
+
+// Helper: Update Fill and optional Stroke on a Lottie Shape Layer
+function setShapeLayerHex(
+  lottieJson: any,
+  layerName: string,
+  fillHex: string,
+  strokeHex?: string
+) {
+  const layer = lottieJson.layers?.find((l: any) => l.nm === layerName);
+  if (!layer || !layer.shapes) return;
+
+  const fillRgba = hexToLottieColor(fillHex);
+  const strokeRgba = strokeHex ? hexToLottieColor(strokeHex) : null;
+
+  const traverseShapes = (items: any[]) => {
+    for (const item of items) {
+      if (item.ty === 'fl' && item.c?.k) {
+        item.c.k = fillRgba;
+      }
+      if (item.ty === 'st' && strokeRgba && item.c?.k) {
+        item.c.k = strokeRgba;
+      }
+      if (item.it) {
+        traverseShapes(item.it);
+      }
+    }
+  };
+
+  traverseShapes(layer.shapes);
+}
+
+// Helper: Recolour the red AFC background image to NFC Navy Blue (#002744) while keeping white stars
+async function createNfcBackground(base64Src: string): Promise<string> {
   return new Promise((resolve) => {
     const img = new Image();
+    img.crossOrigin = 'anonymous';
     img.onload = () => {
       const canvas = document.createElement('canvas');
-      canvas.width = img.width || 1080;
-      canvas.height = img.height || 1920;
+      canvas.width = img.width;
+      canvas.height = img.height;
       const ctx = canvas.getContext('2d');
       if (!ctx) {
-        resolve(afcBase64);
+        resolve(base64Src);
         return;
       }
       ctx.drawImage(img, 0, 0);
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = imageData.data;
 
-      // Exact bg-nfc.png Navy Blue RGB: (0, 59, 102) -> #003B66
       for (let i = 0; i < data.length; i += 4) {
+        const r = data[i];
         const g = data[i + 1];
-        // Measure star whiteness from the green channel (13 in AFC red -> 255 in white star)
-        const t = Math.max(0, Math.min(1, (g - 13) / (255 - 13)));
-        data[i] = Math.round(t * 255); // R: 0 -> 255
-        data[i + 1] = Math.round(59 + t * (255 - 59)); // G: 59 -> 255
-        data[i + 2] = Math.round(102 + t * (255 - 102)); // B: 102 -> 255
+        const b = data[i + 2];
+
+        // Keep dark border pixels dark, and white star pixels white
+        const isDarkBorder = r < 45 && g < 45 && b < 45;
+        const isWhiteStar = r > 200 && g > 200 && b > 200;
+
+        if (!isDarkBorder && !isWhiteStar) {
+          // Map red/crimson tones to NFC Navy (#002744 -> R:0, G:39, B:68)
+          const intensity = r / 215;
+          data[i] = Math.min(255, Math.round(0 * intensity));
+          data[i + 1] = Math.min(255, Math.round(39 * intensity));
+          data[i + 2] = Math.min(255, Math.round(68 * intensity));
+        }
       }
 
       ctx.putImageData(imageData, 0, 0);
-      resolve(canvas.toDataURL('image/png'));
+      resolve(canvas.toDataURL('image/jpeg', 0.92));
     };
-    img.onerror = () => resolve(afcBase64);
-    img.src = afcBase64;
+    img.onerror = () => resolve(base64Src);
+    img.src = base64Src;
   });
 }
 
-const NFC_LOGO_DATA_URI =
-  'data:image/svg+xml;utf8,' +
-  encodeURIComponent(`
-  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 92" width="128" height="92">
-    <path d="M18 86 L18 6 L54 6 L88 56 L88 6 L110 6 L110 86 L74 86 L40 36 L40 86 Z"
-          fill="none" stroke="#ffffff" stroke-width="5" stroke-linejoin="miter"/>
-    <circle cx="64" cy="24" r="3.5" fill="#ffffff"/>
-    <circle cx="64" cy="46" r="3.5" fill="#ffffff"/>
-    <circle cx="64" cy="68" r="3.5" fill="#ffffff"/>
-  </svg>`);
-
 export default function PlayoffEnginePage() {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const animRef = useRef<AnimationItem | null>(null);
-  const rawJsonRef = useRef<any>(null);
-  const nfcBgDataUriRef = useRef<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const animRef = useRef<any>(null);
 
-  const [selectedWeek, setSelectedWeek] = useState<number>(9);
   const [selectedConference, setSelectedConference] = useState<'AFC' | 'NFC'>('AFC');
+  const [selectedWeek, setSelectedWeek] = useState<number>(10);
   const [standings, setStandings] = useState<SeedEntry[]>([]);
-  const [templateReady, setTemplateReady] = useState<boolean>(false);
-  const [maxWeek, setMaxWeek] = useState<number>(9);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [hasInitializedWeek, setHasInitializedWeek] = useState<boolean>(false);
 
-  const weeks = Array.from({ length: maxWeek }, (_, i) => i + 1);
-
+  // 1. Fetch standings from our Node.js API route
   useEffect(() => {
-    fetch(`/nfl-playoff-engine.json?v=${Date.now()}`)
-      .then((res) => res.json())
-      .then(async (json) => {
-        rawJsonRef.current = json;
-        const afcBgAsset = json?.assets?.find((a: any) => a.id === 'image_2');
-        if (afcBgAsset?.p) {
-          nfcBgDataUriRef.current = await generateExactNfcBgFromAfc(afcBgAsset.p);
-        }
-        setTemplateReady(true);
-      })
-      .catch((err) => console.error('Failed to load nfl-playoff-engine.json:', err));
-  }, []);
+    let isMounted = true;
+    setLoading(true);
 
-  useEffect(() => {
-    fetch(`/api/playoffs?week=${selectedWeek}&conference=${selectedConference}`)
+    const queryUrl = hasInitializedWeek
+      ? `/api/playoffs?conference=${selectedConference}&week=${selectedWeek}`
+      : `/api/playoffs?conference=${selectedConference}`;
+
+    fetch(queryUrl)
       .then((res) => res.json())
       .then((data) => {
-        if (data?.maxCompletedWeek) {
-          setMaxWeek(data.maxCompletedWeek);
+        if (!isMounted) return;
+        if (data.week && !hasInitializedWeek) {
+          setSelectedWeek(data.week);
+          setHasInitializedWeek(true);
         }
-        if (data?.standings) {
-          setStandings(data.standings);
+        if (data.seeds) {
+          setStandings(data.seeds);
         }
+        setLoading(false);
       })
-      .catch((err) => console.error('Failed to fetch standings:', err));
-  }, [selectedWeek, selectedConference]);
-
-  useEffect(() => {
-    if (!templateReady || !rawJsonRef.current || standings.length < 7 || !containerRef.current) {
-      return;
-    }
-
-    if (animRef.current) {
-      animRef.current.destroy();
-      animRef.current = null;
-    }
-
-    const animationData = JSON.parse(JSON.stringify(rawJsonRef.current));
-
-    // Updates text value AND optional text fill colour (fc)
-    const setJsonLayerText = (layerName: string, textValue: string, hexColor?: string) => {
-      const layer = animationData.layers?.find((l: any) => l.nm === layerName);
-      if (layer?.t?.d?.k?.[0]?.s) {
-        layer.t.d.k[0].s.t = String(textValue).toUpperCase();
-        if (hexColor) {
-          layer.t.d.k[0].s.fc = hexToLottieColor(hexColor).slice(0, 3);
-        }
-      }
-    };
-
-    // Updates shape fill (primaryHex) AND optional shape stroke (secondaryHex)
-    const setShapeLayerHex = (layerName: string, fillHex: string, strokeHex?: string) => {
-      const layer = animationData.layers?.find((l: any) => l.nm === layerName);
-      if (!layer?.shapes) return;
-      const fillRgba = hexToLottieColor(fillHex);
-      const strokeRgba = strokeHex ? hexToLottieColor(strokeHex) : null;
-
-      const walkShapes = (items: any[]) => {
-        for (const item of items) {
-          if (item.ty === 'fl' && item.c?.k) {
-            item.c.k = fillRgba;
-          }
-          if (item.ty === 'st' && strokeRgba && item.c?.k) {
-            item.c.k = strokeRgba;
-            item.hd = false;
-          }
-          if (item.it) walkShapes(item.it);
-        }
-      };
-      walkShapes(layer.shapes);
-    };
-
-    const fixOverlayParentingAndHeight = (slot: number) => {
-      if (slot === 1) return;
-      const overlayLayer = animationData.layers?.find(
-        (l: any) => l.nm === `Shape_Overlay_Team_${slot}`
-      );
-      if (!overlayLayer) return;
-
-      delete overlayLayer.tt;
-      delete overlayLayer.tp;
-
-      const pathItem = overlayLayer.shapes?.[0]?.it?.find((item: any) => item.ty === 'sh');
-      if (pathItem?.ks?.k?.v) {
-        pathItem.ks.k.v = [
-          [-364.729, -113.033],
-          [-364.729, 47.883],
-          [-477.922, 47.883],
-          [-477.922, -113.033]
-        ];
-      }
-    };
-
-    const injectLayerImage = (
-      layerName: string,
-      uniqueAssetId: string,
-      imageUrl: string,
-      forceWhiteCrest: boolean
-    ) => {
-      const layer = animationData.layers?.find((l: any) => l.nm === layerName);
-      if (!layer || !animationData.assets) return;
-
-      const sourceAsset = animationData.assets.find((a: any) => a.id === layer.refId);
-      if (!sourceAsset) return;
-
-      const cloned = JSON.parse(JSON.stringify(sourceAsset));
-      cloned.id = uniqueAssetId;
-      cloned.p = imageUrl;
-      cloned.u = '';
-      cloned.e = 1;
-
-      layer.refId = uniqueAssetId;
-      if (forceWhiteCrest) {
-        layer.cl = 'white-crest';
-      }
-      animationData.assets.push(cloned);
-    };
-
-    setJsonLayerText('Text_Week', `WEEK ${selectedWeek}`);
-    setJsonLayerText('Text_Title', 'PLAYOFF PICTURE');
-
-    if (selectedConference === 'NFC' && animationData.assets) {
-      const logoAsset = animationData.assets.find((a: any) => a.id === 'image_1');
-      if (logoAsset) {
-        logoAsset.p = NFC_LOGO_DATA_URI;
-        logoAsset.u = '';
-        logoAsset.e = 1;
-      }
-      const bgAsset = animationData.assets.find((a: any) => a.id === 'image_2');
-      if (bgAsset && nfcBgDataUriRef.current) {
-        bgAsset.p = nfcBgDataUriRef.current;
-        bgAsset.u = '';
-        bgAsset.e = 1;
-      }
-    }
-
-    standings.slice(0, 7).forEach((team, idx) => {
-      const slot = idx + 1;
-      const forceWhite = WHITE_CREST_TEAMS.has(team.id);
-
-      // Position number in team's primary colour
-      setJsonLayerText(`Text_Team_Position_${slot}`, String(team.seed), team.primaryHex);
-      setJsonLayerText(`Text_Team_${slot}`, team.nickname);
-      setJsonLayerText(`Text_Record_Team_${slot}`, team.record);
-
-      // Shape_Team_X fill in primary colour + stroke in secondary colour
-      setShapeLayerHex(`Shape_Team_${slot}`, team.primaryHex, team.secondaryHex);
-      setShapeLayerHex(`Shape_Overlay_Team_${slot}`, team.secondaryHex);
-
-      fixOverlayParentingAndHeight(slot);
-      injectLayerImage(`Image_Crest_${slot}`, `crest_slot_${slot}_${team.id}`, team.crestUrl, forceWhite);
-    });
-
-    if (Array.isArray(animationData.layers)) {
-      const expandedLayers: any[] = [];
-      for (const layer of animationData.layers) {
-        expandedLayers.push(layer);
-        if (layer.td === 1 && typeof layer.nm === 'string' && layer.nm.startsWith('Shape_Team_')) {
-          const visibleBar = JSON.parse(JSON.stringify(layer));
-          delete visibleBar.td;
-          visibleBar.ind = layer.ind + 200;
-          visibleBar.nm = `${layer.nm}_VisibleBar`;
-          expandedLayers.push(visibleBar);
-        }
-      }
-      animationData.layers = expandedLayers;
-    }
-
-    // Static 1-frame render (no loop or autoplay)
-    const anim = lottie.loadAnimation({
-      container: containerRef.current,
-      renderer: 'svg',
-      loop: false,
-      autoplay: false,
-      animationData
-    });
-
-    anim.addEventListener('DOMLoaded', () => {
-      // Lock on first frame (00:00:00:01)
-      anim.goToAndStop(0, true);
-
-      const elements = (anim as any)?.renderer?.elements;
-      if (!Array.isArray(elements)) return;
-
-      standings.slice(0, 7).forEach((team, idx) => {
-        if (!WHITE_CREST_TEAMS.has(team.id)) return;
-        const targetLayerName = `Image_Crest_${idx + 1}`;
-        const el = elements.find((item: any) => item?.data?.nm === targetLayerName);
-        if (el?.layerElement) {
-          el.layerElement.style.filter = 'brightness(0) invert(1)';
-          const imgNode = el.layerElement.querySelector('image');
-          if (imgNode) {
-            imgNode.style.filter = 'brightness(0) invert(1)';
-          }
-        }
+      .catch((err) => {
+        console.error('Error loading standings:', err);
+        if (isMounted) setLoading(false);
       });
-    });
-
-    animRef.current = anim;
 
     return () => {
-      anim.destroy();
+      isMounted = false;
     };
-  }, [templateReady, standings, selectedWeek, selectedConference]);
+  }, [selectedConference, selectedWeek, hasInitializedWeek]);
+
+  // 2. Load and inject data into the Lottie JSON template
+  useEffect(() => {
+    if (!standings.length || !containerRef.current) return;
+
+    let isCancelled = false;
+
+    async function renderPlayoffGraphic() {
+      try {
+        const lottie = (await import('lottie-web')).default;
+        const response = await fetch('/nfl-playoff-engine.json');
+        const rawJson = await response.json();
+
+        if (isCancelled || !containerRef.current) return;
+
+        // Update Week Header
+        setJsonLayerText(rawJson, 'Text_Week', `WEEK ${selectedWeek}`);
+
+        // Set Conference Matchup Box Colours (#7F0614 for AFC, #002744 for NFC)
+        const boxHex = selectedConference === 'AFC' ? '#7F0614' : '#002744';
+        for (let i = 1; i <= 3; i++) {
+          setShapeLayerHex(rawJson, `Shape_Box_${i}`, boxHex);
+        }
+
+        // Swap Conference Logo & Background if NFC is selected
+        if (selectedConference === 'NFC') {
+          const logoAsset = rawJson.assets?.find((a: any) => a.id === 'image_1');
+          if (logoAsset) {
+            logoAsset.p = NFC_LOGO_DATA_URI;
+            logoAsset.u = '';
+            logoAsset.e = 1;
+          }
+
+          const bgAsset = rawJson.assets?.find((a: any) => a.id === 'image_2');
+          if (bgAsset?.p) {
+            bgAsset.p = await createNfcBackground(bgAsset.p);
+          }
+        }
+
+        // Inject seeds 1 to 7 into their corresponding layers
+        standings.slice(0, 7).forEach((team, index) => {
+          const rank = index + 1;
+
+          // Update Team Name, Record, and Seed Number
+          setJsonLayerText(rawJson, `Text_Team_${rank}`, team.nickname.toUpperCase());
+          setJsonLayerText(rawJson, `Text_Record_Team_${rank}`, team.record);
+          setJsonLayerText(rawJson, `Text_Team_Position_${rank}`, String(team.seed));
+
+          // Style Position Text with Primary Colour & Overlay Box with Secondary Colour
+          setTextLayerHex(rawJson, `Text_Team_Position_${rank}`, team.primaryHex);
+          setShapeLayerHex(rawJson, `Shape_Overlay_Team_${rank}`, team.secondaryHex);
+
+          // Style Main Team Bar with Primary Fill and Secondary Stroke
+          setShapeLayerHex(
+            rawJson,
+            `Shape_Team_${rank}`,
+            team.primaryHex,
+            team.secondaryHex
+          );
+
+          // Inject Team Crest Image
+          const crestAssetId = `crest_team_${rank}`;
+          rawJson.assets.push({
+            id: crestAssetId,
+            w: 363,
+            h: 251,
+            u: '',
+            p: team.crestUrl,
+            e: 1,
+          });
+
+          const crestLayer = rawJson.layers?.find(
+            (l: any) => l.nm === `Image_Crest_${rank}`
+          );
+          if (crestLayer) {
+            crestLayer.refId = crestAssetId;
+          }
+        });
+
+        // Clean up previous Lottie instance
+        if (animRef.current) {
+          animRef.current.destroy();
+        }
+        containerRef.current.innerHTML = '';
+
+        // Initialize Lottie and play intro animation (frames 0 to 340)
+        const anim = lottie.loadAnimation({
+          container: containerRef.current,
+          renderer: 'svg',
+          loop: false,
+          autoplay: false,
+          animationData: rawJson,
+        });
+
+        animRef.current = anim;
+        anim.playSegments([0, 340], true);
+      } catch (err) {
+        console.error('Failed to render Lottie graphic:', err);
+      }
+    }
+
+    renderPlayoffGraphic();
+
+    return () => {
+      isCancelled = true;
+      if (animRef.current) {
+        animRef.current.destroy();
+      }
+    };
+  }, [standings, selectedConference, selectedWeek]);
 
   return (
-    <div className="page-wrapper">
-      <header className="header">
-        <h1 className="title">NFL PLAYOFF PICTURE ENGINE</h1>
-        <p className="subtitle">Dynamic React + Node.js Broadcast Graphics Pipeline</p>
-      </header>
+    <main className="min-h-screen bg-[#0a0d14] text-white flex flex-col items-center py-8 px-4">
+      <div className="max-w-4xl w-full flex flex-col items-center gap-6">
+        {/* Controls Header */}
+        <div className="w-full flex flex-wrap items-center justify-between gap-4 bg-[#131824] p-4 rounded-xl border border-white/10">
+          {/* Conference Toggle */}
+          <div className="flex items-center gap-2">
+            {(['AFC', 'NFC'] as const).map((conf) => (
+              <button
+                key={conf}
+                onClick={() => setSelectedConference(conf)}
+                className={`px-5 py-2 rounded-lg font-bold tracking-wider transition ${
+                  selectedConference === conf
+                    ? conf === 'AFC'
+                      ? 'bg-[#D50A0A] text-white shadow-lg'
+                      : 'bg-[#013369] text-white shadow-lg'
+                    : 'bg-white/5 text-gray-400 hover:bg-white/10'
+                }`}
+              >
+                {conf}
+              </button>
+            ))}
+          </div>
 
-      <div className="main-container">
-        <div className="selectors-grid">
-          <div className="selector-card">
-            <label className="selector-label">SELECT NFL WEEK (LIVE AUTO-SYNC)</label>
+          {/* Week Selector & Replay Button */}
+          <div className="flex items-center gap-3">
+            <label className="text-sm font-semibold text-gray-300">WEEK:</label>
             <select
               value={selectedWeek}
               onChange={(e) => setSelectedWeek(Number(e.target.value))}
-              className="team-select"
+              className="bg-[#0a0d14] text-white font-bold px-3 py-2 rounded-lg border border-white/15 focus:outline-none"
             >
-              {weeks.map((w) => (
-                <option key={w} value={w}>
-                  Week {w}
+              {Array.from({ length: 18 }, (_, i) => i + 1).map((weekNum) => (
+                <option key={weekNum} value={weekNum}>
+                  Week {weekNum}
                 </option>
               ))}
             </select>
-          </div>
 
-          <div className="selector-card">
-            <label className="selector-label">SELECT CONFERENCE</label>
-            <select
-              value={selectedConference}
-              onChange={(e) => setSelectedConference(e.target.value as 'AFC' | 'NFC')}
-              className="team-select"
+            <button
+              onClick={() => animRef.current?.playSegments([0, 340], true)}
+              className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-sm font-semibold transition"
             >
-              <option value="AFC">AFC (American Football Conference)</option>
-              <option value="NFC">NFC (National Football Conference)</option>
-            </select>
+              ↻ Replay Animation
+            </button>
           </div>
         </div>
 
-        <div className={`canvas-card ${selectedConference === 'AFC' ? 'afc-theme' : 'nfc-theme'}`}>
-          <div className="conference-watermark">
-            {selectedConference === 'AFC' ? 'A' : 'N'}
-          </div>
-          <div id="templateContainer" ref={containerRef} />
+        {/* Lottie Graphic Container */}
+        <div className="relative w-full max-w-[440px] aspect-[9/16] bg-black rounded-2xl overflow-hidden shadow-2xl border border-white/10 flex items-center justify-center">
+          {loading && (
+            <div className="absolute inset-0 bg-black/60 z-10 flex items-center justify-center font-bold tracking-widest text-sm uppercase">
+              Syncing Standings...
+            </div>
+          )}
+          <div ref={containerRef} className="w-full h-full" />
         </div>
       </div>
-    </div>
+    </main>
   );
 }
